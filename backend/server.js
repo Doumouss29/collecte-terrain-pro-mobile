@@ -748,15 +748,43 @@ app.patch(
           return res.status(403).json({ error: 'Accès administrateur requis' });
         }
 
+        // L'identifiant envoyé par l'interface peut être :
+        // - l'id de base44_records ;
+        // - ou l'id de app_users conservé dans data.id.
+        // On accepte les deux pour éviter l'erreur "Utilisateur introuvable".
         const record = await pool.query(
-          "SELECT * FROM base44_records WHERE entity='User' AND id=$1 LIMIT 1",
-          [id]
+          `SELECT *
+           FROM base44_records
+           WHERE entity='User'
+             AND (
+               id::text = $1
+               OR data->>'id' = $1
+             )
+           LIMIT 1`,
+          [String(id)]
         );
-        if (!record.rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
 
-        const currentData = record.rows[0].data || {};
-        const email = currentData.email;
-        if (!email) return res.status(400).json({ error: 'Email utilisateur manquant' });
+        let currentData = record.rows[0]?.data || null;
+        let email = currentData?.email || null;
+
+        // Sécurité supplémentaire : si le User miroir n'existe pas encore,
+        // on recherche directement le compte d'authentification.
+        if (!email) {
+          const account = await pool.query(
+            `SELECT *
+             FROM app_users
+             WHERE id::text = $1
+             LIMIT 1`,
+            [String(id)]
+          );
+
+          if (!account.rows.length) {
+            return res.status(404).json({ error: 'Utilisateur introuvable' });
+          }
+
+          email = account.rows[0].email;
+          currentData = publicUser(account.rows[0]);
+        }
 
         const body = req.body || {};
         const hasOrganisation = Object.prototype.hasOwnProperty.call(body, 'organisation_id');
