@@ -49,6 +49,16 @@ export const base44 = {
   },
   users: { inviteUser: (email, role = 'user', organisationId = null) => request('/api/users/invite', { method: 'POST', body: { email, role, organisation_id: organisationId } }) },
   integrations: { Core: { UploadFile: async ({ file }) => { const formData = new FormData(); formData.append('file', file); return request('/api/upload', { method: 'POST', body: formData }); } } },
+  cadastre: {
+    uploadGeoJSON: async ({ file, organisationId, commune, nomSection }) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('organisation_id', organisationId);
+      formData.append('commune', commune);
+      formData.append('nom_section', nomSection);
+      return request('/api/cadastre/geojson', { method: 'POST', body: formData });
+    },
+  },
   functions: { invoke: (name, data) => request(`/api/functions/${name}`, { method: 'POST', body: data }) },
   appLogs: { logUserInApp: (pageName) => request('/api/app-logs', { method: 'POST', body: { pageName } }).catch(() => null) },
 };

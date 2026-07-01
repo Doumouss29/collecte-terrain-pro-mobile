@@ -44,20 +44,20 @@ export default function CadastreUploadDialog({ isOpen, onClose, organisation }) 
       }
       const nombreParcelles = geojson.features.length;
 
-      // Uploader le fichier
-      const { file_url } = await base44.integrations.Core.UploadFile({ file });
-
-      // Créer l'enregistrement
-      await base44.entities.CadastreCommunal.create({
-        organisation_id: organisation.id,
+      // Le backend valide, compresse et enregistre le GeoJSON dans PostgreSQL.
+      // Il crée aussi l'enregistrement CadastreCommunal avec une URL API stable.
+      const result = await base44.cadastre.uploadGeoJSON({
+        file,
+        organisationId: organisation.id,
         commune: commune.toUpperCase(),
-        nom_section: nomSection.toUpperCase(),
-        nombre_parcelles: nombreParcelles,
-        geojson_url: file_url
+        nomSection: nomSection.toUpperCase(),
       });
 
-      queryClient.invalidateQueries({ queryKey: ['cadastre', organisation.id] });
-      toast.success(`Section ${nomSection} importée (${nombreParcelles} parcelles)`);
+      await queryClient.invalidateQueries({ queryKey: ['cadastre', organisation.id] });
+      await queryClient.refetchQueries({ queryKey: ['cadastre', organisation.id] });
+      toast.success(
+        `Section ${nomSection} importée (${result.nombre_parcelles ?? nombreParcelles} parcelles)`
+      );
       setFile(null);
       setNomSection('');
       setCommune('');

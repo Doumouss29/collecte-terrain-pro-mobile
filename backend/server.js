@@ -5,6 +5,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import PDFDocument from 'pdfkit';
@@ -52,6 +53,25 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } });
+const geojsonUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const validExtension = /\.(geojson|json)$/i.test(file.originalname || '');
+    const validMime = [
+      'application/json',
+      'application/geo+json',
+      'application/octet-stream',
+      'text/plain',
+    ].includes(file.mimetype);
+
+    if (!validExtension && !validMime) {
+      return cb(new Error('Seuls les fichiers .geojson et .json sont acceptés'));
+    }
+
+    cb(null, true);
+  },
+});
 
 function normalize(row) {
   return {
@@ -96,6 +116,36 @@ const AUTH_COOKIE = 'lm_session';
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 const COOKIE_SECURE = process.env.NODE_ENV === 'production';
 const INVITATION_TTL_DAYS = Number(process.env.INVITATION_TTL_DAYS || 7);
+
+async function ensureCadastreGeojsonSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cadastre_geojson_files (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      organisation_id text NOT NULL,
+      commune text NOT NULL,
+      nom_section text NOT NULL,
+      filename text NOT NULL,
+      content_type text NOT NULL DEFAULT 'application/geo+json',
+      content_compressed bytea NOT NULL,
+      original_size_bytes bigint NOT NULL DEFAULT 0,
+      compressed_size_bytes bigint NOT NULL DEFAULT 0,
+      feature_count integer NOT NULL DEFAULT 0,
+      sha256 text NOT NULL,
+      created_by text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cadastre_geojson_org
+      ON cadastre_geojson_files (organisation_id);
+
+    CREATE INDEX IF NOT EXISTS idx_cadastre_geojson_commune
+      ON cadastre_geojson_files (organisation_id, commune);
+
+    CREATE INDEX IF NOT EXISTS idx_cadastre_geojson_section
+      ON cadastre_geojson_files (organisation_id, commune, nom_section);
+  `);
+}
 
 function publicUser(row) {
   return {
@@ -685,6 +735,166 @@ app.post('/api/invitations/:token/accept', async (req, res, next) => {
   }
 });
 
+/* ------------------------- GEOJSON CADASTRAL PERSISTANT ------------------------- */
+
+app.post(
+  '/api/cadastre/geojson',
+  requireAuth,
+  requireAdmin,
+  geojsonUpload.single('file'),
+  async (req, res, next) => {
+    const client = await pool.connect();
+
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'Fichier GeoJSON manquant' });
+      }
+
+      const organisationId = String(req.body.organisation_id || '').trim();
+      const commune = String(req.body.commune || '').trim().toUpperCase();
+      const nomSection = String(req.body.nom_section || '').trim().toUpperCase();
+
+      if (!organisationId || !commune || !nomSection) {
+        return res.status(400).json({
+          error: 'organisation_id, commune et nom_section sont obligatoires',
+        });
+      }
+
+      let geojson;
+      try {
+        geojson = JSON.parse(req.file.buffer.toString('utf8'));
+      } catch (_error) {
+        return res.status(400).json({ error: 'Le fichier ne contient pas un JSON valide' });
+      }
+
+      if (
+        !geojson ||
+        geojson.type !== 'FeatureCollection' ||
+        !Array.isArray(geojson.features)
+      ) {
+        return res.status(400).json({
+          error: 'Le fichier doit être un GeoJSON FeatureCollection valide',
+        });
+      }
+
+      const canonicalBuffer = Buffer.from(JSON.stringify(geojson), 'utf8');
+      const compressed = zlib.gzipSync(canonicalBuffer, { level: 9 });
+      const sha256 = crypto.createHash('sha256').update(canonicalBuffer).digest('hex');
+      const safeFilename = (req.file.originalname || `${nomSection}.geojson`)
+        .replace(/[^a-zA-Z0-9._-]/g, '_');
+
+      await client.query('BEGIN');
+
+      const fileResult = await client.query(
+        `INSERT INTO cadastre_geojson_files (
+           organisation_id,
+           commune,
+           nom_section,
+           filename,
+           content_type,
+           content_compressed,
+           original_size_bytes,
+           compressed_size_bytes,
+           feature_count,
+           sha256,
+           created_by
+         )
+         VALUES ($1,$2,$3,$4,'application/geo+json',$5,$6,$7,$8,$9,$10)
+         RETURNING id, filename, feature_count, sha256, created_at`,
+        [
+          organisationId,
+          commune,
+          nomSection,
+          safeFilename,
+          compressed,
+          canonicalBuffer.length,
+          compressed.length,
+          geojson.features.length,
+          sha256,
+          req.user.email,
+        ]
+      );
+
+      const fileRow = fileResult.rows[0];
+      const geojsonUrl = `/api/cadastre/geojson/${fileRow.id}`;
+
+      const cadastreData = {
+        organisation_id: organisationId,
+        commune,
+        nom_section: nomSection,
+        nombre_parcelles: geojson.features.length,
+        geojson_url: geojsonUrl,
+        geojson_file_id: fileRow.id,
+        geojson_storage: 'postgresql',
+        geojson_sha256: sha256,
+        filename: safeFilename,
+        created_by: req.user.email,
+      };
+
+      const cadastreResult = await client.query(
+        `INSERT INTO base44_records(entity, data)
+         VALUES('CadastreCommunal', $1::jsonb)
+         RETURNING *`,
+        [JSON.stringify(cadastreData)]
+      );
+
+      await client.query('COMMIT');
+
+      res.status(201).json({
+        ok: true,
+        geojson_file_id: fileRow.id,
+        geojson_url: geojsonUrl,
+        nombre_parcelles: geojson.features.length,
+        sha256,
+        cadastre: normalize(cadastreResult.rows[0]),
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.get(
+  '/api/cadastre/geojson/:id',
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT *
+         FROM cadastre_geojson_files
+         WHERE id=$1
+         LIMIT 1`,
+        [req.params.id]
+      );
+
+      if (!result.rows.length) {
+        return res.status(404).json({ error: 'Fichier GeoJSON introuvable' });
+      }
+
+      const row = result.rows[0];
+      const etag = `\"${row.sha256}\"`;
+
+      if (req.headers['if-none-match'] === etag) {
+        return res.status(304).end();
+      }
+
+      const content = zlib.gunzipSync(row.content_compressed);
+
+      res.setHeader('Content-Type', 'application/geo+json; charset=utf-8');
+      res.setHeader('Content-Length', String(content.length));
+      res.setHeader('ETag', etag);
+      res.setHeader('Cache-Control', 'private, max-age=86400, stale-while-revalidate=604800');
+      res.setHeader('X-GeoJSON-SHA256', row.sha256);
+      res.send(content);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 /* ------------------------- ENTITÉS ------------------------- */
 
 app.get('/api/entities/:entity', requireAuth, async (req, res, next) => {
@@ -848,6 +1058,46 @@ app.delete(
     try {
       const { entity, id } = req.params;
 
+      if (entity === 'CadastreCommunal') {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const record = await client.query(
+            `SELECT data FROM base44_records
+             WHERE entity='CadastreCommunal' AND id=$1
+             LIMIT 1`,
+            [id]
+          );
+
+          if (!record.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Section cadastrale introuvable' });
+          }
+
+          const fileId = record.rows[0].data?.geojson_file_id;
+          await client.query(
+            `DELETE FROM base44_records
+             WHERE entity='CadastreCommunal' AND id=$1`,
+            [id]
+          );
+
+          if (fileId) {
+            await client.query(
+              'DELETE FROM cadastre_geojson_files WHERE id=$1',
+              [fileId]
+            );
+          }
+
+          await client.query('COMMIT');
+          return res.json({ ok: true, geojson_file_id: fileId || null });
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+      }
+
       await pool.query(
         'DELETE FROM base44_records WHERE entity=$1 AND id=$2',
         [entity, id]
@@ -930,6 +1180,7 @@ app.use((error, _req, res, _next) => {
 });
 
 await ensureAuthSchema();
+await ensureCadastreGeojsonSchema();
 await ensureInitialAdmin();
 
 app.listen(PORT, '0.0.0.0', () => {

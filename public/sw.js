@@ -1,4 +1,4 @@
-const VERSION = 'collecte-terrain-v1';
+const VERSION = 'collecte-terrain-v3-postgres-geojson';
 const APP_CACHE = `${VERSION}-app`;
 const DATA_CACHE = `${VERSION}-data`;
 const GEO_CACHE = `${VERSION}-geojson`;
@@ -52,7 +52,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (/\.(geojson|json)$/i.test(url.pathname) || url.pathname.startsWith('/uploads/')) {
+  if (url.pathname.startsWith('/api/cadastre/geojson/') || /\.(geojson|json)$/i.test(url.pathname) || url.pathname.startsWith('/uploads/')) {
     event.respondWith(staleWhileRevalidate(request, GEO_CACHE));
     return;
   }
