@@ -36,42 +36,10 @@ const pool = new pg.Pool({
   idleTimeoutMillis: 30000,
 });
 
-const allowedOrigins = String(
-  process.env.CORS_ORIGIN ||
-  process.env.APP_URL ||
-  process.env.PUBLIC_BASE_URL ||
-  ''
-)
-  .split(',')
-  .map((origin) => origin.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
-
 app.use(cors({
-  origin(origin, callback) {
-    // Autorise les requêtes sans en-tête Origin : curl, outils serveur, navigation directe.
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    const normalizedOrigin = origin.replace(/\/+$/, '');
-
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(normalizedOrigin)) {
-      return callback(null, true);
-    }
-
-    console.error('Origine CORS refusée :', normalizedOrigin);
-    return callback(
-      new Error(`Origine non autorisée par CORS : ${normalizedOrigin}`)
-    );
-  },
+  origin: process.env.CORS_ORIGIN || true,
   credentials: true,
-  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Length', 'Content-Type'],
-  maxAge: 86400,
 }));
-
-app.options('*', cors());
 app.use(express.json({ limit: '35mb' }));
 app.use(cookieParser());
 app.use('/uploads', express.static(uploadDir, { maxAge: '30d', immutable: false }));
@@ -772,6 +740,59 @@ app.patch(
   async (req, res, next) => {
     try {
       const { entity, id } = req.params;
+
+      // Les utilisateurs existent dans app_users (authentification) et dans
+      // base44_records (interface). Toute modification doit rester synchronisée.
+      if (entity === 'User') {
+        if (req.user.role !== 'admin') {
+          return res.status(403).json({ error: 'Accès administrateur requis' });
+        }
+
+        const record = await pool.query(
+          "SELECT * FROM base44_records WHERE entity='User' AND id=$1 LIMIT 1",
+          [id]
+        );
+        if (!record.rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+        const currentData = record.rows[0].data || {};
+        const email = currentData.email;
+        if (!email) return res.status(400).json({ error: 'Email utilisateur manquant' });
+
+        const body = req.body || {};
+        const hasOrganisation = Object.prototype.hasOwnProperty.call(body, 'organisation_id');
+        const hasRole = Object.prototype.hasOwnProperty.call(body, 'role');
+        const hasCommunes = Object.prototype.hasOwnProperty.call(body, 'communes_supervisees');
+        const hasStatus = Object.prototype.hasOwnProperty.call(body, 'status');
+
+        const updatedUser = await pool.query(
+          `UPDATE app_users SET
+             organisation_id = CASE WHEN $1 THEN $2::uuid ELSE organisation_id END,
+             role = CASE WHEN $3 THEN $4 ELSE role END,
+             communes_supervisees = CASE WHEN $5 THEN $6::jsonb ELSE communes_supervisees END,
+             status = CASE WHEN $7 THEN $8 ELSE status END,
+             updated_at = now()
+           WHERE lower(email)=lower($9)
+           RETURNING *`,
+          [
+            hasOrganisation,
+            body.organisation_id || null,
+            hasRole,
+            body.role || null,
+            hasCommunes,
+            JSON.stringify(body.communes_supervisees || []),
+            hasStatus,
+            body.status || null,
+            email,
+          ]
+        );
+
+        if (!updatedUser.rows.length) {
+          return res.status(404).json({ error: 'Compte authentifié introuvable' });
+        }
+
+        await syncBase44User(updatedUser.rows[0]);
+        return res.json(publicUser(updatedUser.rows[0]));
+      }
 
       const result = await pool.query(
         `UPDATE base44_records

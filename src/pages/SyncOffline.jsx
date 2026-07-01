@@ -3,23 +3,69 @@ import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Wifi, WifiOff, Cloud, Trash2, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Wifi, WifiOff, Cloud, Trash2, Loader2, CheckCircle, AlertCircle, Download, Upload, HardDrive, ShieldCheck } from 'lucide-react';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { createPageUrl } from '@/utils';
 import { useOfflineSync } from '@/components/offline/useOfflineSync';
 import { toast } from 'sonner';
 import OfflineIndicator from '@/components/offline/OfflineIndicator';
+import { exportOfflineBackup, importOfflineBackup, getStorageStatus, requestPersistentStorage, formatBytes } from '@/lib/persistentStorage';
 
 export default function SyncOffline() {
   const navigate = useNavigate();
   const { isOnline, pendingCount, isSyncing, syncError, syncCollectes, offlineStorage } = useOfflineSync();
   const [collectes, setCollectes] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [storageStatus, setStorageStatus] = useState({ supported: false, persisted: false, usage: 0, quota: 0 });
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
     loadCollectes();
+    refreshStorageStatus();
   }, []);
+
+  const refreshStorageStatus = async () => {
+    setStorageStatus(await getStorageStatus());
+  };
+
+  const handlePersistStorage = async () => {
+    const result = await requestPersistentStorage();
+    setStorageStatus(result);
+    if (result.persisted) toast.success('Stockage persistant activé sur ce téléphone');
+    else toast.warning("Le navigateur n'a pas accordé le stockage persistant");
+  };
+
+  const handleExportBackup = async () => {
+    setIsExporting(true);
+    try {
+      const result = await exportOfflineBackup();
+      toast.success(`${result.count} collecte(s) sauvegardée(s) dans ${result.filename}`);
+    } catch (error) {
+      if (error?.name !== 'AbortError') toast.error(error?.message || 'Échec de la sauvegarde');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImportBackup = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!confirm('Importer cette sauvegarde dans le stockage local du téléphone ?')) return;
+    setIsImporting(true);
+    try {
+      const result = await importOfflineBackup(file);
+      await loadCollectes();
+      await refreshStorageStatus();
+      toast.success(`${result.count} collecte(s) restaurée(s)`);
+    } catch (error) {
+      toast.error(error?.message || 'Échec de la restauration');
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   const loadCollectes = async () => {
     setIsLoading(true);
@@ -158,6 +204,50 @@ export default function SyncOffline() {
                 )}
               </Button>
             )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-0 shadow-md mb-6">
+          <CardHeader className="border-b">
+            <CardTitle className="flex items-center gap-2">
+              <HardDrive className="w-5 h-5 text-blue-700" />
+              Stockage du téléphone et sauvegarde
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-6 space-y-4">
+            <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-4">
+              <div>
+                <p className="font-semibold text-slate-800 flex items-center gap-2">
+                  {storageStatus.persisted && <ShieldCheck className="w-4 h-4 text-green-600" />}
+                  {storageStatus.persisted ? 'Stockage persistant actif' : 'Stockage persistant non confirmé'}
+                </p>
+                <p className="text-sm text-slate-500 mt-1">
+                  Utilisé : {formatBytes(storageStatus.usage)} sur {formatBytes(storageStatus.quota)}
+                </p>
+              </div>
+              {!storageStatus.persisted && (
+                <Button variant="outline" onClick={handlePersistStorage}>Activer</Button>
+              )}
+            </div>
+
+            <p className="text-sm text-slate-600">
+              La sauvegarde ZIP est enregistrée dans Fichiers/Téléchargements sur Android, ou proposée dans la feuille de partage sur iPhone. Elle contient les collectes et les photos.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Button onClick={handleExportBackup} disabled={isExporting} className="bg-blue-700 hover:bg-blue-800">
+                {isExporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                Sauvegarder dans le téléphone
+              </Button>
+
+              <label className="inline-flex">
+                <input type="file" accept=".zip,application/zip" className="hidden" onChange={handleImportBackup} disabled={isImporting} />
+                <span className="w-full inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium cursor-pointer hover:bg-accent">
+                  {isImporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Upload className="w-4 h-4 mr-2" />}
+                  Restaurer une sauvegarde
+                </span>
+              </label>
+            </div>
           </CardContent>
         </Card>
 

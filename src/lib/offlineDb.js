@@ -90,6 +90,19 @@ export const offlineDb = {
     await tx(COLLECTES, 'readwrite', (store) => store.put(item)); emitChange();
   },
   async deleteCollecte(localId) { await tx(COLLECTES, 'readwrite', (store) => store.delete(Number(localId))); emitChange(); },
+  async clearCollectes() { await tx(COLLECTES, 'readwrite', (store) => store.clear()); emitChange(); },
+  async importCollectes(items = [], { replace = false } = {}) {
+    if (!Array.isArray(items)) throw new Error('Sauvegarde invalide');
+    if (replace) await this.clearCollectes();
+    for (const source of items) {
+      const item = structuredClone(source);
+      if (!item.createdAt) item.createdAt = new Date().toISOString();
+      item.updatedAt = item.updatedAt || item.createdAt;
+      await tx(COLLECTES, 'readwrite', (store) => store.put(item));
+    }
+    emitChange();
+    return items.length;
+  },
   async cacheApi(key, value) { return tx(API_CACHE, 'readwrite', (store) => store.put({ key, value: structuredClone(value), cachedAt: Date.now() })); },
   async getCachedApi(key) { const row = await tx(API_CACHE, 'readonly', (store) => store.get(key)); return row?.value ?? null; },
   async setMeta(key, value) { return tx(META, 'readwrite', (store) => store.put({ key, value })); },

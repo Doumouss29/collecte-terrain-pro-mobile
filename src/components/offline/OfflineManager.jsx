@@ -1,10 +1,22 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import OfflineIndicator from './OfflineIndicator';
 import { useOfflineSync } from './useOfflineSync';
+import { requestPersistentStorage } from '@/lib/persistentStorage';
 import { toast } from 'sonner';
 
 export default function OfflineManager() {
   const state = useOfflineSync();
-  const sync = async () => { const result = await state.syncCollectes(); result.success ? toast.success(result.message) : toast.error('Synchronisation incomplète'); };
+
+  useEffect(() => {
+    requestPersistentStorage().catch((error) => {
+      console.warn('Stockage persistant non accordé :', error);
+    });
+  }, []);
+
+  const sync = async () => {
+    const result = await state.syncCollectes();
+    result.success ? toast.success(result.message) : toast.error('Synchronisation incomplète');
+  };
+
   return <OfflineIndicator {...state} onSync={sync} />;
 }

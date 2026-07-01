@@ -134,13 +134,14 @@ export default function AdminOrganisations() {
   const updateUserOrgMutation = useMutation({
    mutationFn: ({ userId, organisation_id }) =>
      base44.entities.User.update(userId, { organisation_id }),
-   onSuccess: () => {
-     queryClient.invalidateQueries({ queryKey: ['allUsers'] });
+   onSuccess: async () => {
+     await queryClient.invalidateQueries({ queryKey: ['allUsers'] });
+     await queryClient.refetchQueries({ queryKey: ['allUsers'] });
      setMemberEmail('');
      toast.success('Membre mis à jour');
    },
-   onError: () => {
-     toast.error('Erreur lors de la mise à jour');
+   onError: (error) => {
+     toast.error(error?.message || 'Erreur lors de la mise à jour');
    }
   });
 
