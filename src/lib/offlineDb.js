@@ -42,6 +42,11 @@ async function tx(storeName, mode, action) {
 
 function emitChange() { window.dispatchEvent(new CustomEvent('offline-queue-change')); }
 
+function createOfflineSyncId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `offline-${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+}
+
 export const offlineDb = {
   init: openDb,
   async saveCollecte(data, options = {}) {
@@ -51,6 +56,9 @@ export const offlineDb = {
       localId: options.localId,
       serverId: options.serverId || data.id || null,
       operation: options.serverId || data.id ? 'update' : 'create',
+      // Identifiant stable envoyé au serveur à chaque tentative. Il empêche
+      // la création de doublons lorsque plusieurs synchronisations se chevauchent.
+      offline_sync_id: data.offline_sync_id || options.offlineSyncId || createOfflineSyncId(),
       status: 'pending',
       retryCount: 0,
       lastError: null,
@@ -69,10 +77,29 @@ export const offlineDb = {
     if (!item) {
       return this.saveCollecte(data, { serverId: String(localIdOrServerId) });
     }
-    item = { ...item, ...structuredClone(data), status: 'pending', operation: item.serverId ? 'update' : 'create', updatedAt: new Date().toISOString(), lastError: null };
+    item = {
+      ...item,
+      ...structuredClone(data),
+      offline_sync_id: item.offline_sync_id || data.offline_sync_id || createOfflineSyncId(),
+      status: 'pending',
+      operation: item.serverId ? 'update' : 'create',
+      updatedAt: new Date().toISOString(),
+      lastError: null,
+    };
     await tx(COLLECTES, 'readwrite', (store) => store.put(item));
     emitChange();
     return item.localId;
+  },
+  async ensureOfflineSyncId(localId) {
+    const item = await this.getCollecte(localId);
+    if (!item) return null;
+    if (!item.offline_sync_id) {
+      item.offline_sync_id = createOfflineSyncId();
+      item.updatedAt = new Date().toISOString();
+      await tx(COLLECTES, 'readwrite', (store) => store.put(item));
+      emitChange();
+    }
+    return item.offline_sync_id;
   },
   getAllCollectes() { return tx(COLLECTES, 'readonly', (store) => store.getAll()); },
   async getPendingCollectes() { return (await this.getAllCollectes()).filter((x) => x.status === 'pending' || x.status === 'error'); },

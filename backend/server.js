@@ -923,6 +923,8 @@ app.get('/api/entities/:entity', requireAuth, async (req, res, next) => {
 });
 
 app.post('/api/entities/:entity', requireAuth, async (req, res, next) => {
+  const client = await pool.connect();
+
   try {
     const { entity } = req.params;
     const body = { ...(req.body || {}) };
@@ -931,7 +933,45 @@ app.post('/api/entities/:entity', requireAuth, async (req, res, next) => {
       body.created_by = req.user.email;
     }
 
-    const result = await pool.query(
+    // Idempotence des collectes synchronisées hors ligne.
+    // Le même offline_sync_id renvoie toujours la même ligne, même si le
+    // téléphone répète la requête ou si deux synchronisations se chevauchent.
+    if (entity === 'Collecte' && body.offline_sync_id) {
+      const syncId = String(body.offline_sync_id).trim();
+      body.offline_sync_id = syncId;
+
+      await client.query('BEGIN');
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1))',
+        [`Collecte:${syncId}`]
+      );
+
+      const existing = await client.query(
+        `SELECT *
+         FROM base44_records
+         WHERE entity = 'Collecte'
+           AND data->>'offline_sync_id' = $1
+         LIMIT 1`,
+        [syncId]
+      );
+
+      if (existing.rows.length) {
+        await client.query('COMMIT');
+        return res.status(200).json(normalize(existing.rows[0]));
+      }
+
+      const inserted = await client.query(
+        `INSERT INTO base44_records(entity, data)
+         VALUES('Collecte', $1::jsonb)
+         RETURNING *`,
+        [JSON.stringify(body)]
+      );
+
+      await client.query('COMMIT');
+      return res.status(201).json(normalize(inserted.rows[0]));
+    }
+
+    const result = await client.query(
       `INSERT INTO base44_records(entity, data)
        VALUES($1, $2::jsonb)
        RETURNING *`,
@@ -940,7 +980,10 @@ app.post('/api/entities/:entity', requireAuth, async (req, res, next) => {
 
     res.status(201).json(normalize(result.rows[0]));
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => null);
     next(error);
+  } finally {
+    client.release();
   }
 });
 
